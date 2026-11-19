@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: kh
+      POSTGRES_PASSWORD: kh
+      POSTGRES_DB: kh_workers
+    ports:
+      # 5433 on the host: 5432 is commonly taken by a local Postgres.
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kh -d kh_workers"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres-data:
