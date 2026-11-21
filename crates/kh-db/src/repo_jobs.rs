@@ -209,6 +209,66 @@ impl PgJobs {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Move up to `limit` failed jobs back to `pending` with a fresh attempt
+    /// budget, optionally limited to one `kind`.
+    ///
+    /// Returns the number of jobs requeued.
+    pub async fn requeue_failed(&self, kind: Option<&str>, limit: i64) -> Result<u64, DbError> {
+        if limit <= 0 {
+            return Ok(0);
+        }
+
+        let mut tx = self.pool.begin().await?;
+
+        let ids = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT id
+            FROM jobs
+            WHERE status = 'failed'
+              AND ($1::text IS NULL OR kind = $1)
+            ORDER BY completed_at, id
+            FOR UPDATE SKIP LOCKED
+            LIMIT $2
+            "#,
+        )
+        .bind(kind)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        if ids.is_empty() {
+            tx.rollback().await?;
+            return Ok(0);
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE jobs
+            SET status = 'pending',
+                attempts = 0,
+                run_at = now(),
+                worker_id = NULL,
+                claimed_at = NULL,
+                heartbeat_at = NULL,
+                completed_at = NULL,
+                last_error = NULL
+            WHERE id = ANY($1)
+            "#,
+        )
+        .bind(&ids)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query("SELECT pg_notify($1, '')")
+            .bind(JOBS_READY_CHANNEL)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+
+        Ok(result.rows_affected())
+    }
+
     /// Requeue or fail running jobs whose heartbeat is older than
     /// `stale_after`. Exhausted jobs move to `failed`; the rest go back to
     /// `pending`.

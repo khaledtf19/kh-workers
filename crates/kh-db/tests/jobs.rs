@@ -219,6 +219,54 @@ async fn stats_counts_jobs_by_status(pool: PgPool) -> Result<(), DbError> {
 }
 
 #[sqlx::test]
+async fn requeue_failed_resets_attempts_and_schedules(pool: PgPool) -> Result<(), DbError> {
+    let jobs = repo(pool);
+    let job = jobs
+        .enqueue(&NewJob::new("work", json!({})).max_attempts(1))
+        .await?;
+    jobs.claim("worker-a", 1).await?;
+    jobs.fail(job.id, "worker-a", "boom").await?;
+
+    assert_eq!(jobs.requeue_failed(None, 10).await?, 1);
+
+    let stored = jobs.get(job.id).await?.expect("job exists");
+    assert_eq!(stored.status, JobStatus::Pending);
+    assert_eq!(stored.attempts, 0);
+    assert!(stored.claimed_at.is_none());
+    assert!(stored.heartbeat_at.is_none());
+    assert!(stored.completed_at.is_none());
+    assert!(stored.worker_id.is_none());
+    assert!(stored.last_error.is_none());
+    Ok(())
+}
+
+#[sqlx::test]
+async fn requeue_failed_can_filter_by_kind(pool: PgPool) -> Result<(), DbError> {
+    let jobs = repo(pool);
+    let email = jobs
+        .enqueue(&NewJob::new("email", json!({})).max_attempts(1))
+        .await?;
+    let resize = jobs
+        .enqueue(&NewJob::new("resize", json!({})).max_attempts(1))
+        .await?;
+    jobs.claim("worker-a", 10).await?;
+    jobs.fail(email.id, "worker-a", "boom").await?;
+    jobs.fail(resize.id, "worker-a", "boom").await?;
+
+    assert_eq!(jobs.requeue_failed(Some("email"), 10).await?, 1);
+
+    assert_eq!(
+        jobs.get(email.id).await?.expect("job exists").status,
+        JobStatus::Pending
+    );
+    assert_eq!(
+        jobs.get(resize.id).await?.expect("job exists").status,
+        JobStatus::Failed
+    );
+    Ok(())
+}
+
+#[sqlx::test]
 async fn enqueue_notifies_listeners(pool: PgPool) -> Result<(), DbError> {
     let mut listener = PgListener::connect_with(&pool).await?;
     listener.listen(JOBS_READY_CHANNEL).await?;
