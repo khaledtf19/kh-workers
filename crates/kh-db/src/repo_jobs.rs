@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use sqlx::postgres::types::PgInterval;
 
 use crate::error::DbError;
+use crate::listener::JOBS_READY_CHANNEL;
 
 /// PostgreSQL-backed job repository.
 #[derive(Debug, Clone)]
@@ -16,8 +17,10 @@ impl PgJobs {
         Self { pool }
     }
 
-    /// Insert a new job and return it as stored.
+    /// Insert a new job and notify listeners once the insert commits.
     pub async fn enqueue(&self, job: &NewJob) -> Result<Job, DbError> {
+        let mut tx = self.pool.begin().await?;
+
         let row = sqlx::query_as::<_, JobRow>(
             r#"
             INSERT INTO jobs (kind, payload, max_attempts, run_at, timeout)
@@ -30,8 +33,15 @@ impl PgJobs {
         .bind(job.max_attempts)
         .bind(job.run_at)
         .bind(job.timeout)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
+
+        sqlx::query("SELECT pg_notify($1, '')")
+            .bind(JOBS_READY_CHANNEL)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
 
         Job::try_from(row)
     }

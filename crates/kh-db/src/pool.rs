@@ -2,6 +2,7 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 
 use crate::config::DbConfig;
 use crate::error::DbError;
+use crate::listener::JobListener;
 use crate::repo_jobs::PgJobs;
 
 /// Handle to the Postgres database used by the queue.
@@ -40,5 +41,12 @@ impl Db {
     /// Access the job repository.
     pub fn jobs(&self) -> PgJobs {
         PgJobs::new(self.pool.clone())
+    }
+
+    /// Create a listener that wakes the queue when jobs are enqueued.
+    ///
+    /// The listener holds one pool connection for the lifetime of the worker.
+    pub fn listener(&self) -> JobListener {
+        JobListener::spawn(self.pool.clone())
     }
 }

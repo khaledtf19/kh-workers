@@ -2,9 +2,10 @@ use std::collections::HashSet;
 
 use chrono::{Duration, Utc};
 use kh_core::{Job, JobId, JobStatus, NewJob};
-use kh_db::{Db, DbError, PgJobs, ReapStats};
+use kh_db::{Db, DbError, JOBS_READY_CHANNEL, PgJobs, ReapStats};
 use serde_json::json;
 use sqlx::PgPool;
+use sqlx::postgres::PgListener;
 
 fn repo(pool: PgPool) -> PgJobs {
     Db::from_pool(pool).jobs()
@@ -214,5 +215,20 @@ async fn stats_counts_jobs_by_status(pool: PgPool) -> Result<(), DbError> {
     assert_eq!(stats.running, 0);
     assert_eq!(stats.completed, 0);
     assert_eq!(stats.failed, 1);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn enqueue_notifies_listeners(pool: PgPool) -> Result<(), DbError> {
+    let mut listener = PgListener::connect_with(&pool).await?;
+    listener.listen(JOBS_READY_CHANNEL).await?;
+
+    let jobs = repo(pool);
+    jobs.enqueue(&NewJob::new("notify", json!({}))).await?;
+
+    let notification = tokio::time::timeout(std::time::Duration::from_secs(5), listener.recv())
+        .await
+        .expect("timed out waiting for notification")?;
+    assert_eq!(notification.channel(), JOBS_READY_CHANNEL);
     Ok(())
 }
